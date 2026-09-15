@@ -1,0 +1,23 @@
+{
+  "name": "heatshield-backend",
+  "version": "1.0.0",
+  "description": "HeatShield API server — deterministic rule engine + AI synthesis",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/core": "^1.2.11",
+    "@langchain/openai": "^1.5.13",
+    "axios": "^1.20.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "langchain": "^1.5.11"
+  }
+}
