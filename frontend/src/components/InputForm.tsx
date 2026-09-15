@@ -1,36 +1,41 @@
-import { useState, useEffect } from 'react';
-import { MapPin, Activity, Clock, Timer, Search, ChevronDown } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { MapPin, Activity, Clock, Timer, Search, X, Loader2 } from 'lucide-react';
 import type { AnalysisRequest } from '../hooks/useHeatAnalysis';
 
-// Curated list of major Indian cities — avoids adding a geocoding API dependency (§2 / §7)
-const CITY_OPTIONS = [
-  { label: 'New Delhi', lat: 28.6139, lon: 77.209 },
-  { label: 'Mumbai', lat: 19.076, lon: 72.8777 },
-  { label: 'Bengaluru', lat: 12.9716, lon: 77.5946 },
-  { label: 'Chennai', lat: 13.0827, lon: 80.2707 },
-  { label: 'Kolkata', lat: 22.5726, lon: 88.3639 },
-  { label: 'Hyderabad', lat: 17.385, lon: 78.4867 },
-  { label: 'Pune', lat: 18.5204, lon: 73.8567 },
-  { label: 'Ahmedabad', lat: 23.0225, lon: 72.5714 },
-  { label: 'Jaipur', lat: 26.9124, lon: 75.7873 },
-  { label: 'Lucknow', lat: 26.8467, lon: 80.9462 },
-  { label: 'Dehradun', lat: 30.3165, lon: 78.0322 },
-  { label: 'Chandigarh', lat: 30.7333, lon: 76.7794 },
-  { label: 'Bhopal', lat: 23.2599, lon: 77.4126 },
-  { label: 'Patna', lat: 25.5941, lon: 85.1376 },
-  { label: 'Nagpur', lat: 21.1458, lon: 79.0882 },
-];
+// ── Activity → Default Intensity Mapping (Phase 2) ───────────────────────────
+const ACTIVITY_INTENSITY_MAP: Record<string, 'low' | 'moderate' | 'high'> = {
+  'Running':           'high',
+  'Walking':           'moderate',
+  'Cycling':           'high',
+  'Hiking':            'high',
+  'Football':          'high',
+  'Cricket':           'moderate',
+  'Tennis':            'high',
+  'Construction Work': 'high',
+  'Farming':           'moderate',
+  'Yoga (Outdoor)':   'low',
+  'Resting':           'low',
+};
 
-const ACTIVITIES = [
-  'Running', 'Walking', 'Cycling', 'Hiking', 'Football',
-  'Cricket', 'Tennis', 'Construction Work', 'Farming', 'Yoga (Outdoor)',
-];
+const ACTIVITIES = Object.keys(ACTIVITY_INTENSITY_MAP);
 
 const INTENSITY_LABELS = {
-  low: 'Low — Leisurely pace, minimal exertion',
+  low:      'Low — Leisurely pace, minimal exertion',
   moderate: 'Moderate — Brisk pace, elevated heart rate',
-  high: 'High — Vigorous exertion, heavy sweating',
+  high:     'High — Vigorous exertion, heavy sweating',
 };
+
+// ── Default location: Dehradun ────────────────────────────────────────────────
+const DEFAULT_LOCATION = { label: 'Dehradun', lat: 30.3165, lon: 78.0322 };
+
+interface GeoResult {
+  id: number;
+  name: string;
+  country: string;
+  admin1?: string;
+  latitude: number;
+  longitude: number;
+}
 
 interface InputFormProps {
   onSubmit: (req: AnalysisRequest) => void;
@@ -41,23 +46,104 @@ function getDefaultDateTime(): string {
   const now = new Date();
   now.setMinutes(0, 0, 0);
   now.setHours(now.getHours() + 1);
-  // Format as datetime-local compatible string
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:00`;
 }
 
 export function InputForm({ onSubmit, loading }: InputFormProps) {
-  const [cityIndex, setCityIndex] = useState(0);
+  // ── Location autocomplete state ──────────────────────────────────────────
+  const [query, setQuery] = useState(DEFAULT_LOCATION.label);
+  const [selectedLocation, setSelectedLocation] = useState(DEFAULT_LOCATION);
+  const [suggestions, setSuggestions] = useState<GeoResult[]>([]);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // ── Activity + auto-intensity state ─────────────────────────────────────
   const [activity, setActivity] = useState('Running');
-  const [intensity, setIntensity] = useState<'low' | 'moderate' | 'high'>('moderate');
+  const [intensity, setIntensity] = useState<'low' | 'moderate' | 'high'>('high');
+  const [manualIntensity, setManualIntensity] = useState(false);
+
+  // ── Other form state ─────────────────────────────────────────────────────
   const [plannedTime, setPlannedTime] = useState(getDefaultDateTime());
   const [duration, setDuration] = useState(45);
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Debounced geocode search
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      setSuggestions([]);
+      setShowDropdown(false);
+      return;
+    }
+
+    // Don't re-search if the query matches the already-selected location
+    if (trimmed === selectedLocation.label) return;
+
+    debounceRef.current = setTimeout(async () => {
+      setGeoLoading(true);
+      try {
+        const res = await fetch(
+          `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(trimmed)}&count=5&language=en&format=json`
+        );
+        const data = await res.json();
+        setSuggestions(data.results ?? []);
+        setShowDropdown(true);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setGeoLoading(false);
+      }
+    }, 350);
+  }, [query]);
+
+  // Auto-intensity: snap when activity changes (unless user manually overrode)
+  useEffect(() => {
+    if (!manualIntensity) {
+      setIntensity(ACTIVITY_INTENSITY_MAP[activity] ?? 'moderate');
+    }
+  }, [activity]);
+
+  const handleSelectSuggestion = (geo: GeoResult) => {
+    const label = geo.admin1 ? `${geo.name}, ${geo.admin1}, ${geo.country}` : `${geo.name}, ${geo.country}`;
+    setQuery(label);
+    setSelectedLocation({ label, lat: geo.latitude, lon: geo.longitude });
+    setSuggestions([]);
+    setShowDropdown(false);
+  };
+
+  const handleIntensityClick = (lvl: 'low' | 'moderate' | 'high') => {
+    setIntensity(lvl);
+    setManualIntensity(true); // user explicitly overrode
+  };
+
+  const handleActivityChange = (newActivity: string) => {
+    setActivity(newActivity);
+    setManualIntensity(false); // reset override on activity change
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const city = CITY_OPTIONS[cityIndex];
     onSubmit({
-      location: { lat: city.lat, lon: city.lon, label: city.label },
+      location: {
+        lat: selectedLocation.lat,
+        lon: selectedLocation.lon,
+        label: selectedLocation.label,
+      },
       activity: activity.toLowerCase(),
       activityIntensity: intensity,
       plannedTime: new Date(plannedTime).toISOString(),
@@ -68,82 +154,129 @@ export function InputForm({ onSubmit, loading }: InputFormProps) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="bg-[#1e2a40] rounded-2xl p-6 border border-[#2d3f5e] space-y-5"
+      className="bg-white rounded-2xl p-6 border border-orange-100 shadow-md shadow-orange-900/5 space-y-5"
     >
-      <h2 className="text-lg font-semibold text-[#e8edf5] flex items-center gap-2">
-        <Search size={18} className="text-[#3b82f6]" />
+      <h2 className="text-lg font-semibold text-stone-800 flex items-center gap-2">
+        <Search size={18} className="text-orange-500" />
         Plan Your Activity
       </h2>
 
-      {/* Location */}
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-1.5 text-sm font-medium text-[#8ea4c8]">
+      {/* ── Location Autocomplete ── */}
+      <div className="space-y-1.5" ref={wrapperRef}>
+        <label className="flex items-center gap-1.5 text-sm font-medium text-stone-500">
           <MapPin size={14} /> Location
         </label>
         <div className="relative">
-          <select
-            id="city-select"
-            value={cityIndex}
-            onChange={(e) => setCityIndex(Number(e.target.value))}
-            className="w-full bg-[#0f1623] border border-[#2d3f5e] text-[#e8edf5] rounded-xl px-4 py-3 appearance-none focus:outline-none focus:border-[#3b82f6] transition-colors"
-          >
-            {CITY_OPTIONS.map((c, i) => (
-              <option key={c.label} value={i}>{c.label}</option>
-            ))}
-          </select>
-          <ChevronDown size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8ea4c8] pointer-events-none" />
+          <div className="relative">
+            <input
+              id="location-search"
+              type="text"
+              autoComplete="off"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => suggestions.length > 0 && setShowDropdown(true)}
+              placeholder="Search any city worldwide…"
+              className="w-full bg-white border border-orange-200 text-stone-800 rounded-xl pl-4 pr-10 py-3 focus:outline-none focus:ring-2 focus:ring-orange-400/50 focus:border-orange-400 transition-all placeholder:text-stone-400"
+            />
+            <div className="absolute right-3 top-1/2 -translate-y-1/2">
+              {geoLoading ? (
+                <Loader2 size={15} className="text-orange-400 animate-spin" />
+              ) : query && query !== selectedLocation.label ? (
+                <button
+                  type="button"
+                  onClick={() => { setQuery(selectedLocation.label); setSuggestions([]); setShowDropdown(false); }}
+                  className="text-stone-400 hover:text-stone-600"
+                >
+                  <X size={15} />
+                </button>
+              ) : (
+                <MapPin size={15} className="text-orange-400" />
+              )}
+            </div>
+          </div>
+
+          {/* Suggestions dropdown */}
+          {showDropdown && suggestions.length > 0 && (
+            <ul className="absolute z-20 mt-1.5 w-full bg-white border border-orange-100 rounded-xl shadow-lg shadow-orange-900/10 overflow-hidden">
+              {suggestions.map((geo) => {
+                const label = geo.admin1
+                  ? `${geo.name}, ${geo.admin1}, ${geo.country}`
+                  : `${geo.name}, ${geo.country}`;
+                return (
+                  <li key={geo.id}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectSuggestion(geo)}
+                      className="w-full text-left px-4 py-3 text-sm hover:bg-orange-50 transition-colors flex items-center gap-2.5"
+                    >
+                      <MapPin size={13} className="text-orange-400 flex-shrink-0" />
+                      <span className="text-stone-700">{label}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
-        <p className="text-xs text-[#8ea4c8]">
-          {CITY_OPTIONS[cityIndex].lat.toFixed(4)}°N, {CITY_OPTIONS[cityIndex].lon.toFixed(4)}°E
-        </p>
+
+        {selectedLocation && (
+          <p className="text-xs text-stone-400">
+            {selectedLocation.lat.toFixed(4)}°N, {selectedLocation.lon.toFixed(4)}°E
+          </p>
+        )}
       </div>
 
-      {/* Activity */}
+      {/* ── Activity ── */}
       <div className="space-y-1.5">
-        <label className="flex items-center gap-1.5 text-sm font-medium text-[#8ea4c8]">
+        <label className="flex items-center gap-1.5 text-sm font-medium text-stone-500">
           <Activity size={14} /> Activity
         </label>
         <div className="relative">
           <select
             id="activity-select"
             value={activity}
-            onChange={(e) => setActivity(e.target.value)}
-            className="w-full bg-[#0f1623] border border-[#2d3f5e] text-[#e8edf5] rounded-xl px-4 py-3 appearance-none focus:outline-none focus:border-[#3b82f6] transition-colors"
+            onChange={(e) => handleActivityChange(e.target.value)}
+            className="w-full bg-white border border-orange-200 text-stone-800 rounded-xl px-4 py-3 appearance-none focus:outline-none focus:ring-2 focus:ring-orange-400/50 focus:border-orange-400 transition-all"
           >
             {ACTIVITIES.map((a) => (
               <option key={a} value={a}>{a}</option>
             ))}
           </select>
-          <ChevronDown size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8ea4c8] pointer-events-none" />
+          <Activity size={15} className="absolute right-3 top-1/2 -translate-y-1/2 text-orange-400 pointer-events-none" />
         </div>
       </div>
 
-      {/* Intensity */}
+      {/* ── Intensity ── */}
       <div className="space-y-1.5">
-        <label className="text-sm font-medium text-[#8ea4c8]">Intensity</label>
+        <label className="text-sm font-medium text-stone-500">
+          Intensity
+          {!manualIntensity && (
+            <span className="ml-2 text-xs text-orange-500 font-normal">auto-matched</span>
+          )}
+        </label>
         <div className="grid grid-cols-3 gap-2">
           {(['low', 'moderate', 'high'] as const).map((lvl) => (
             <button
               key={lvl}
               type="button"
               id={`intensity-${lvl}`}
-              onClick={() => setIntensity(lvl)}
+              onClick={() => handleIntensityClick(lvl)}
               className={`py-2.5 rounded-xl text-sm font-medium capitalize transition-all ${
                 intensity === lvl
-                  ? 'bg-[#3b82f6] text-white shadow-lg shadow-blue-900/30'
-                  : 'bg-[#0f1623] text-[#8ea4c8] border border-[#2d3f5e] hover:border-[#3b82f6]'
+                  ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-md shadow-orange-500/30'
+                  : 'bg-orange-50 text-stone-600 border border-orange-200 hover:border-orange-400 hover:bg-orange-100'
               }`}
             >
               {lvl}
             </button>
           ))}
         </div>
-        <p className="text-xs text-[#8ea4c8]">{INTENSITY_LABELS[intensity]}</p>
+        <p className="text-xs text-stone-400">{INTENSITY_LABELS[intensity]}</p>
       </div>
 
-      {/* Planned Time */}
+      {/* ── Planned Time ── */}
       <div className="space-y-1.5">
-        <label className="flex items-center gap-1.5 text-sm font-medium text-[#8ea4c8]">
+        <label className="flex items-center gap-1.5 text-sm font-medium text-stone-500">
           <Clock size={14} /> Planned Start Time
         </label>
         <input
@@ -151,15 +284,16 @@ export function InputForm({ onSubmit, loading }: InputFormProps) {
           type="datetime-local"
           value={plannedTime}
           onChange={(e) => setPlannedTime(e.target.value)}
-          className="w-full bg-[#0f1623] border border-[#2d3f5e] text-[#e8edf5] rounded-xl px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors [color-scheme:dark]"
+          className="w-full bg-white border border-orange-200 text-stone-800 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-400/50 focus:border-orange-400 transition-all [color-scheme:light]"
           required
         />
       </div>
 
-      {/* Duration */}
+      {/* ── Duration ── */}
       <div className="space-y-1.5">
-        <label className="flex items-center gap-1.5 text-sm font-medium text-[#8ea4c8]">
-          <Timer size={14} /> Duration — <span className="text-[#e8edf5] font-semibold">{duration} min</span>
+        <label className="flex items-center gap-1.5 text-sm font-medium text-stone-500">
+          <Timer size={14} /> Duration —{' '}
+          <span className="text-stone-800 font-semibold">{duration} min</span>
         </label>
         <input
           id="duration-slider"
@@ -169,19 +303,20 @@ export function InputForm({ onSubmit, loading }: InputFormProps) {
           step={5}
           value={duration}
           onChange={(e) => setDuration(Number(e.target.value))}
-          className="w-full accent-[#3b82f6]"
+          className="w-full accent-orange-500"
         />
-        <div className="flex justify-between text-xs text-[#8ea4c8]">
-          <span>5 min</span><span>3 hrs</span>
+        <div className="flex justify-between text-xs text-stone-400">
+          <span>5 min</span>
+          <span>3 hrs</span>
         </div>
       </div>
 
-      {/* Submit */}
+      {/* ── Submit ── */}
       <button
         id="analyze-btn"
         type="submit"
         disabled={loading}
-        className="w-full py-3.5 rounded-xl font-semibold text-white bg-gradient-to-r from-[#3b82f6] to-[#6366f1] hover:from-[#2563eb] hover:to-[#4f46e5] disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-900/30 flex items-center justify-center gap-2"
+        className="w-full py-3.5 rounded-xl font-semibold text-white bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md shadow-orange-500/30 flex items-center justify-center gap-2"
       >
         {loading ? (
           <>
