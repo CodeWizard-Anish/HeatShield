@@ -1,27 +1,21 @@
 /**
  * WeatherService.js
- *
- * Responsibility: Fetch raw meteorological data from Open-Meteo API.
- * Architecture (§2, §4.1): Open-Meteo is the SOLE weather source.
- * Includes a resilient fallback for 429 Rate Limit errors common on shared cloud IPs.
+ * 
+ * Primary: Open-Meteo API
+ * Fallback: OpenWeather API (triggered on 429 Rate Limits)
  */
 import axios from 'axios';
 
 const OPEN_METEO_BASE = process.env.OPEN_METEO_BASE_URL || 'https://api.open-meteo.com/v1';
+const OPENWEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 
-/**
- * Fetch forecasted weather data for a given coordinate and planned time.
- *
- * @param {number} lat
- * @param {number} lon
- * @param {string} plannedTime - ISO 8601 datetime string
- * @returns {Promise<{temperatureC: number, humidityPercent: number, uvIndex: number, windSpeedKmh: number}>}
- */
 export async function fetchWeather(lat, lon, plannedTime) {
-  try {
-    const targetDate = new Date(plannedTime);
-    const dateStr = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
+  const targetDate = new Date(plannedTime);
+  const targetTs = targetDate.getTime();
 
+  try {
+    // ── PRIMARY: Open-Meteo ──────────────────────────────────────────────
+    const dateStr = targetDate.toISOString().split('T')[0];
     const response = await axios.get(`${OPEN_METEO_BASE}/forecast`, {
       params: {
         latitude: lat,
@@ -33,24 +27,17 @@ export async function fetchWeather(lat, lon, plannedTime) {
         start_date: dateStr,
         end_date: dateStr,
       },
-      timeout: 5000, // Added timeout to prevent hanging requests
+      timeout: 5000,
     });
 
     const data = response.data;
+    if (!data.hourly || !data.hourly.time) throw new Error('Unexpected Open-Meteo response shape');
 
-    if (!data.hourly || !data.hourly.time) {
-      throw new Error('Unexpected Open-Meteo response shape');
-    }
-
-    // Find the hourly slot closest to plannedTime
     const times = data.hourly.time;
-    const targetTs = targetDate.getTime();
-
     let closestIndex = 0;
     let minDiff = Infinity;
     for (let i = 0; i < times.length; i++) {
-      const slotTs = new Date(times[i]).getTime();
-      const diff = Math.abs(slotTs - targetTs);
+      const diff = Math.abs(new Date(times[i]).getTime() - targetTs);
       if (diff < minDiff) {
         minDiff = diff;
         closestIndex = i;
@@ -65,19 +52,50 @@ export async function fetchWeather(lat, lon, plannedTime) {
     };
 
   } catch (error) {
-    // Graceful degradation for Render's shared IP rate limits
+    // ── FALLBACK: OpenWeather ────────────────────────────────────────────
     if (error.response?.status === 429 || error.code === 'ECONNABORTED') {
-      console.warn("⚠️ Open-Meteo rate limit (429) hit on Render IP. Using deterministic fallback data.");
+      console.warn("⚠️ Open-Meteo rate limit hit. Switching to OpenWeather API.");
 
-      return {
-        temperatureC: 38.5,
-        humidityPercent: 65,
-        uvIndex: 8.5,
-        windSpeedKmh: 12,
-      };
+      if (!OPENWEATHER_API_KEY) {
+        console.error("❌ OPENWEATHER_API_KEY missing. Cannot use OpenWeather fallback.");
+        throw error;
+      }
+
+      try {
+        const owResponse = await axios.get(`https://api.openweathermap.org/data/2.5/forecast`, {
+          params: { lat, lon, appid: OPENWEATHER_API_KEY, units: 'metric' },
+          timeout: 5000
+        });
+
+        // Find the closest 3-hour forecast interval
+        let closest = owResponse.data.list[0];
+        let minDiff = Infinity;
+        for (const item of owResponse.data.list) {
+          const diff = Math.abs((item.dt * 1000) - targetTs);
+          if (diff < minDiff) {
+            minDiff = diff;
+            closest = item;
+          }
+        }
+
+        // Standard free OpenWeather lacks UV; calculate a time-based heuristic
+        const hour = targetDate.getHours();
+        const isNight = hour >= 18 || hour < 7;
+        const estimatedUvIndex = isNight ? 0 : 7.5;
+
+        return {
+          temperatureC: closest.main.temp,
+          humidityPercent: closest.main.humidity,
+          windSpeedKmh: closest.wind.speed * 3.6, // Convert m/s to km/h
+          uvIndex: estimatedUvIndex,
+        };
+
+      } catch (owError) {
+        console.error("❌ OpenWeather fallback also failed:", owError.message);
+        throw owError;
+      }
     }
 
-    // If it is a different error (e.g., DNS failure), throw it so analyze.js can return a 502
     throw error;
   }
 }
