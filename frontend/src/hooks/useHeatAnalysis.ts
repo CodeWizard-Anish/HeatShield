@@ -49,7 +49,7 @@ export function useHeatAnalysis(): UseHeatAnalysisReturn {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.post<AnalysisResult>('/api/analyze-exposure', req);
+      const response = await axios.post<AnalysisResult>('https://heatshield-ydf4.onrender.com/', req);
       setResult(response.data);
     } catch (err: unknown) {
       if (axios.isAxiosError(err)) {
