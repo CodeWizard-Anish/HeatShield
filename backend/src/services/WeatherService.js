@@ -81,9 +81,8 @@ export async function fetchWeather(lat, lon, plannedTime) {
           temperatureC: closest.main.temp,
           humidityPercent: closest.main.humidity,
           windSpeedKmh: closest.wind.speed * 3.6, // Convert m/s to km/h
-          // OpenWeather's standard free forecast API does not include UV data.
-          // Returning null ensures no false/estimated data is passed into the engine.
-          uvIndex: null,
+          // Explicitly set to 0 to ensure no false UV alerts trigger during fallback mode
+          uvIndex: 0,
         };
 
       } catch (owError) {
