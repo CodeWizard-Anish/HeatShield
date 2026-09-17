@@ -1,11 +1,5 @@
 /**
  * analyze.js — Route Handler for POST /api/analyze-exposure
- *
- * Orchestrates the strict linear pipeline (ARCHITECTURE §3):
- *   Validate → WeatherService → RuleEngine → SynthesisService → Response
- *
- * The riskLevel produced by RuleEngine is FINAL before SynthesisService is called.
- * SynthesisService receives it as a read-only narration input.
  */
 import { Router } from 'express';
 import { fetchWeather } from '../services/WeatherService.js';
@@ -46,66 +40,84 @@ function validatePayload(body) {
 // ── POST /api/analyze-exposure ────────────────────────────────────────────────
 
 router.post('/analyze-exposure', async (req, res) => {
-  // Step 1: Validate request payload
-  const validationErrors = validatePayload(req.body);
-  if (validationErrors.length > 0) {
-    return res.status(400).json({ error: 'Invalid request payload', details: validationErrors });
-  }
+  console.log("🚀 Incoming request body:", JSON.stringify(req.body, null, 2));
 
-  const { location, activity, activityIntensity, plannedTime, durationMinutes } = req.body;
-
-  // Step 2: Fetch raw weather data from Open-Meteo (single source of truth)
-  let weatherRaw;
   try {
-    weatherRaw = await fetchWeather(location.lat, location.lon, plannedTime);
-  } catch (err) {
-    console.error('WeatherService failed:', err.message);
-    return res.status(502).json({
-      error: 'Failed to fetch weather data from Open-Meteo. Please try again.',
-      detail: err.message,
+    // Step 1: Validate request payload
+    const validationErrors = validatePayload(req.body);
+    if (validationErrors.length > 0) {
+      console.log("❌ Validation failed:", validationErrors);
+      return res.status(400).json({ error: 'Invalid request payload', details: validationErrors });
+    }
+
+    const { location, activity, activityIntensity, plannedTime, durationMinutes } = req.body;
+
+    // Step 2: Fetch raw weather data from Open-Meteo
+    let weatherRaw;
+    try {
+      console.log(`☁️ Fetching weather for Lat: ${location.lat}, Lon: ${location.lon}`);
+      weatherRaw = await fetchWeather(location.lat, location.lon, plannedTime);
+      console.log("✅ Weather fetched successfully.");
+    } catch (err) {
+      console.error('❌ WeatherService failed:', err.message);
+      return res.status(502).json({
+        error: 'Failed to fetch weather data from Open-Meteo. Please try again.',
+        detail: err.message,
+      });
+    }
+
+    // Step 3: Run deterministic rule engine
+    console.log("🧠 Running Rule Engine...");
+    const { riskLevel, riskLabel, apparentTemperatureC } = assess({
+      temperatureC: weatherRaw.temperatureC,
+      humidityPercent: weatherRaw.humidityPercent,
+      uvIndex: weatherRaw.uvIndex,
+      activityIntensity,
+      durationMinutes,
+      plannedTime,
+    });
+    console.log(`✅ Risk Assessed: Level ${riskLevel} (${riskLabel})`);
+
+    const weatherSnapshot = {
+      temperatureC: weatherRaw.temperatureC,
+      humidityPercent: weatherRaw.humidityPercent,
+      apparentTemperatureC,
+      uvIndex: weatherRaw.uvIndex,
+      windSpeedKmh: weatherRaw.windSpeedKmh,
+    };
+
+    // Step 4: AI synthesis
+    console.log("🤖 Generating AI Synthesis...");
+    const synthesis = await synthesize({
+      riskLevel,
+      riskLabel,
+      weatherSnapshot,
+      activity,
+      activityIntensity,
+      durationMinutes,
+    });
+    console.log("✅ AI Synthesis complete.");
+
+    // Step 5: Assemble and return
+    console.log("📤 Sending response to frontend.");
+    return res.json({
+      riskLevel,
+      riskLabel,
+      weatherSnapshot,
+      explanation: synthesis.explanation,
+      precautions: synthesis.precautions,
+      recommendedAlternatives: synthesis.recommendedAlternatives,
+      citations: synthesis.citations,
+    });
+
+  } catch (error) {
+    // This catches ANY crash and keeps the server alive!
+    console.error("🔥 FATAL ERROR in analyze-exposure route:", error);
+    return res.status(500).json({
+      error: "Internal Server Error",
+      details: error.message || error.toString()
     });
   }
-
-  // Step 3: Run deterministic rule engine — riskLevel is NOW FINAL
-  const { riskLevel, riskLabel, apparentTemperatureC } = assess({
-    temperatureC: weatherRaw.temperatureC,
-    humidityPercent: weatherRaw.humidityPercent,
-    uvIndex: weatherRaw.uvIndex,
-    activityIntensity,
-    durationMinutes,
-    plannedTime,
-  });
-
-  // Build the weather snapshot (§5.2 contract)
-  const weatherSnapshot = {
-    temperatureC: weatherRaw.temperatureC,
-    humidityPercent: weatherRaw.humidityPercent,
-    apparentTemperatureC,
-    uvIndex: weatherRaw.uvIndex,
-    windSpeedKmh: weatherRaw.windSpeedKmh,
-  };
-
-  // Step 4: AI synthesis — receives riskLevel as READ-ONLY
-  // Per §6.2: if this fails, we still return the deterministic data
-  const synthesis = await synthesize({
-    riskLevel,
-    riskLabel,
-    weatherSnapshot,
-    activity,
-    activityIntensity,
-    durationMinutes,
-  });
-
-  // Step 5: Assemble and return the Section 5.2 response payload
-  return res.json({
-    riskLevel,
-    riskLabel,
-    weatherSnapshot,
-    explanation: synthesis.explanation,
-    precautions: synthesis.precautions,
-    recommendedAlternatives: synthesis.recommendedAlternatives,
-    citations: synthesis.citations,
-  });
 });
 
 export default router;
