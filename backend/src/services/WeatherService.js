@@ -67,7 +67,6 @@ export async function fetchWeather(lat, lon, plannedTime) {
           timeout: 5000
         });
 
-        // Find the closest 3-hour forecast interval
         let closest = owResponse.data.list[0];
         let minDiff = Infinity;
         for (const item of owResponse.data.list) {
@@ -78,16 +77,13 @@ export async function fetchWeather(lat, lon, plannedTime) {
           }
         }
 
-        // Standard free OpenWeather lacks UV; calculate a time-based heuristic
-        const hour = targetDate.getHours();
-        const isNight = hour >= 18 || hour < 7;
-        const estimatedUvIndex = isNight ? 0 : 7.5;
-
         return {
           temperatureC: closest.main.temp,
           humidityPercent: closest.main.humidity,
           windSpeedKmh: closest.wind.speed * 3.6, // Convert m/s to km/h
-          uvIndex: estimatedUvIndex,
+          // OpenWeather's standard free forecast API does not include UV data.
+          // Returning null ensures no false/estimated data is passed into the engine.
+          uvIndex: null,
         };
 
       } catch (owError) {
