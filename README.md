@@ -244,4 +244,4 @@ Per the architecture constitution, the following are explicitly **not** part of 
 
 ## 📄 License
 
-ISC
+Designed and developed by Anish Raj.
